@@ -7,6 +7,9 @@ const app = express();
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(express.json());                  // parse JSON bodies from ESP32
 app.use(express.static('public'));        // serve dashboard at GET /
+app.get('/', (req, res) => {
+  res.sendFile(__dirname + '/public/heartbeat_dashboard_2.html');
+});  
 
 // ── In-memory store (last 500 readings) ──────────────────────────────────────
 const MAX_HISTORY = 500;
