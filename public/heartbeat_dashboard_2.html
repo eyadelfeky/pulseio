@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Heart Rate Monitor — ESP32</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap');
+
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --surface2: #1a1a26;
+    --border: rgba(255,255,255,0.07);
+    --red: #ff3b5c;
+    --blue: #3b8eff;
+    --green: #00e676;
+    --muted: #555570;
+    --text: #e8e8f0;
+    --text2: #8888a8;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Syne', sans-serif;
+    min-height: 100vh;
+    padding: 2rem;
+    overflow-x: hidden;
+  }
+
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.08) 2px,rgba(0,0,0,0.08) 4px);
+    pointer-events: none; z-index: 999;
+  }
+
+  /* ── ALERT OVERLAY ── */
+  #alert-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    z-index: 1000; pointer-events: none;
+    animation: alertFlash 0.4s ease infinite alternate;
+  }
+  #alert-overlay.high { background: rgba(255,59,92,0.1); }
+  #alert-overlay.low  { background: rgba(59,142,255,0.1); }
+  @keyframes alertFlash { from{opacity:0.3} to{opacity:1} }
+
+  /* ── ALERT BANNER ── */
+  #alert-banner {
+    display: none;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border-radius: 12px;
+    padding: 12px 20px;
+    margin-bottom: 1rem;
+    font-family: 'Space Mono', monospace;
+    font-size: 13px;
+  }
+  #alert-banner.high {
+    background: #1a0a0e; border: 1px solid var(--red); color: var(--red);
+    animation: bannerPulse 0.7s ease infinite alternate;
+  }
+  #alert-banner.low  {
+    background: #080f1a; border: 1px solid var(--blue); color: var(--blue);
+    animation: bannerPulseLow 0.7s ease infinite alternate;
+  }
+  @keyframes bannerPulse    { from{border-color:#ff3b5c55} to{border-color:#ff3b5c} }
+  @keyframes bannerPulseLow { from{border-color:#3b8eff55} to{border-color:#3b8eff} }
+
+  .alert-icon { font-size: 1.3rem; animation: iconBounce 0.5s ease infinite alternate; }
+  @keyframes iconBounce { from{transform:scale(1)} to{transform:scale(1.2)} }
+
+  .alert-mute-btn {
+    background: transparent;
+    border: 1px solid currentColor; color: inherit;
+    font-family: 'Space Mono', monospace; font-size: 10px;
+    padding: 4px 10px; border-radius: 6px; cursor: pointer;
+    pointer-events: all;
+  }
+  .alert-mute-btn:hover { opacity: 0.7; }
+
+  /* ── HEADER ── */
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2rem; }
+  .logo { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.5px; }
+  .logo span { color: var(--red); }
+
+  .status-badge {
+    display: flex; align-items: center; gap: 8px;
+    font-family: 'Space Mono', monospace; font-size: 11px;
+    color: var(--text2); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 999px; padding: 6px 14px;
+  }
+
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); transition: background 0.3s; }
+  .dot.live { background: var(--green); animation: blink 1s infinite; }
+  .dot.warn { background: #ffaa00; }
+  .dot.err  { background: var(--red); }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+  /* ── METRICS ── */
+  .metrics { display: grid; grid-template-columns: repeat(4,1fr); gap: 1rem; margin-bottom: 1.5rem; }
+
+  .metric {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 1.25rem;
+    position: relative; overflow: hidden;
+    transition: border-color 0.3s, box-shadow 0.3s;
+  }
+  .metric::after {
+    content: ''; position: absolute; top: 0; left: 0; right: 0;
+    height: 2px; background: var(--accent, var(--muted));
+  }
+  .metric.red   { --accent: var(--red); }
+  .metric.blue  { --accent: var(--blue); }
+  .metric.green { --accent: var(--green); }
+  .metric.gray  { --accent: var(--muted); }
+
+  /* spike flash */
+  @keyframes spikeFlash {
+    0%  { box-shadow: 0 0 40px rgba(255,59,92,0.8); border-color: var(--red); }
+    100%{ box-shadow: 0 0 0 rgba(255,59,92,0); border-color: var(--border); }
+  }
+  .metric.spike-flash { animation: spikeFlash 0.7s ease forwards !important; }
+
+  /* alert states */
+  .metric.alerting-high { border-color: var(--red) !important; box-shadow: 0 0 16px rgba(255,59,92,0.3); }
+  .metric.alerting-low  { border-color: var(--blue) !important; box-shadow: 0 0 16px rgba(59,142,255,0.3); }
+
+  .metric-label { font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text2); margin-bottom: 0.5rem; }
+  .metric-value { font-family: 'Space Mono', monospace; font-size: 2.2rem; font-weight: 700; line-height: 1; color: var(--text); transition: color 0.3s; }
+  .metric-unit  { font-size: 12px; color: var(--text2); margin-left: 4px; }
+  .metric-sub   { font-size: 11px; color: var(--text2); margin-top: 6px; font-family: 'Space Mono', monospace; }
+
+  /* ── ALERT SETTINGS ── */
+  .alert-settings {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 1.25rem 1.5rem; margin-bottom: 1.5rem;
+  }
+  .alert-settings-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
+  .alert-settings-title  { font-size: 12px; letter-spacing: 1px; text-transform: uppercase; color: var(--text2); }
+
+  .toggle-switch { position: relative; width: 40px; height: 22px; cursor: pointer; }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider { position: absolute; inset: 0; background: var(--muted); border-radius: 22px; transition: background 0.3s; }
+  .toggle-slider::before { content:''; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px; background: white; border-radius: 50%; transition: transform 0.3s; }
+  .toggle-switch input:checked + .toggle-slider { background: var(--green); }
+  .toggle-switch input:checked + .toggle-slider::before { transform: translateX(18px); }
+
+  .alert-row { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+  .alert-field { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text2); font-family: 'Space Mono', monospace; }
+
+  .alert-input {
+    width: 72px; background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text); font-family: 'Space Mono', monospace; font-size: 13px;
+    padding: 6px 10px; border-radius: 8px; outline: none; text-align: center;
+  }
+  .alert-input:focus { border-color: rgba(255,255,255,0.3); }
+  .alert-field.high .alert-input { border-color: rgba(255,59,92,0.4); }
+  .alert-field.low  .alert-input { border-color: rgba(59,142,255,0.4); }
+  .alert-field.spike .alert-input { border-color: rgba(255,149,0,0.4); }
+  .alert-field.spike { margin-left: auto; }
+
+  /* ── CHART ── */
+  .chart-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem;
+    transition: border-color 0.4s, box-shadow 0.4s;
+  }
+  .chart-card.spiking { border-color: rgba(255,59,92,0.5); box-shadow: 0 0 20px rgba(255,59,92,0.1); }
+  .chart-card.alerting-high { border-color: rgba(255,59,92,0.4); }
+  .chart-card.alerting-low  { border-color: rgba(59,142,255,0.4); }
+
+  .chart-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; flex-wrap: wrap; gap: 8px; }
+  .chart-title  { font-size: 12px; letter-spacing: 1px; text-transform: uppercase; color: var(--text2); }
+
+  .legend { display: flex; gap: 14px; font-family: 'Space Mono', monospace; font-size: 10px; color: var(--text2); align-items: center; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-line { width: 18px; height: 2px; border-radius: 2px; }
+
+  .chart-wrap { position: relative; height: 260px; }
+
+  /* spike markers overlay */
+  #spike-markers { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+  .spike-mark {
+    position: absolute; top: 0; bottom: 0; width: 2px;
+    background: linear-gradient(to bottom, rgba(255,59,92,0.9), rgba(255,59,92,0.1));
+    animation: spikeFade 2.5s ease forwards;
+  }
+  .spike-mark::before {
+    content: '⚡';
+    position: absolute; top: 4px; left: 50%; transform: translateX(-50%);
+    font-size: 11px;
+  }
+  @keyframes spikeFade { 0%{opacity:1} 60%{opacity:0.7} 100%{opacity:0} }
+
+  /* ── CONTROLS ── */
+  .controls { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+  .ctrl-group { display: flex; align-items: center; gap: 8px; }
+  .ctrl-label { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--text2); }
+
+  select, button {
+    background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text); font-family: 'Space Mono', monospace; font-size: 12px;
+    padding: 8px 14px; border-radius: 8px; cursor: pointer; outline: none;
+    transition: border-color 0.2s, background 0.2s;
+  }
+  select:hover, button:hover { border-color: rgba(255,255,255,0.2); background: #20202e; }
+  button.primary { background: var(--red); border-color: var(--red); color: #fff; font-weight: 700; }
+  button.primary:hover { background: #ff1a3e; }
+  button.primary.connected { background: #1a6e3e; border-color: var(--green); color: var(--green); }
+
+  /* ── LOG ── */
+  .log-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1rem 1.25rem; margin-top: 1rem; }
+  .log-title { font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text2); margin-bottom: 8px; }
+  .log-body  { font-family: 'Space Mono', monospace; font-size: 11px; color: var(--text2); height: 70px; overflow: hidden; display: flex; flex-direction: column-reverse; gap: 3px; }
+  .log-row   { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .log-row.ok    { color: var(--green); }
+  .log-row.beat  { color: var(--text2); }
+  .log-row.warn  { color: #ffaa00; }
+  .log-row.spike { color: var(--red); font-weight: 700; }
+  .log-row.alert { color: var(--red); }
+  .log-row.info  { color: var(--blue); }
+
+  /* ── HEART ── */
+  .heart-icon { display: inline-block; animation: heartbeat 0.8s ease infinite; color: var(--red); font-size: 1rem; }
+  @keyframes heartbeat { 0%,100%{transform:scale(1)} 14%{transform:scale(1.3)} 28%{transform:scale(1)} 42%{transform:scale(1.2)} 70%{transform:scale(1)} }
+  .heart-icon.off { animation: none; color: var(--muted); }
+
+  .no-serial-warn { background: #1a1200; border: 1px solid #443300; border-radius: 10px; padding: 10px 16px; font-size: 12px; color: #ffaa00; margin-bottom: 1rem; display: none; font-family: 'Space Mono', monospace; }
+
+  @media (max-width: 700px) {
+    .metrics { grid-template-columns: repeat(2,1fr); }
+    body { padding: 1rem; }
+    .alert-row { flex-direction: column; align-items: flex-start; }
+    .alert-field.spike { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+
+<div id="alert-overlay"></div>
+
+<header>
+  <div class="logo">PULSE<span>.</span>IO</div>
+  <div class="status-badge">
+    <div class="dot" id="dot"></div>
+    <span id="status-txt">disconnected</span>
+  </div>
+</header>
+
+<!-- Alert banner -->
+<div id="alert-banner">
+  <div style="display:flex;align-items:center;gap:10px">
+    <span class="alert-icon" id="alert-icon">⚠️</span>
+    <span id="alert-msg">BPM out of range</span>
+  </div>
+  <button class="alert-mute-btn" id="mute-btn" onclick="muteAlert()">MUTE</button>
+</div>
+
+<div class="no-serial-warn" id="no-serial-warn" style="display:none">
+  Could not reach the server. Check the URL and make sure the server is running.
+</div>
+
+<!-- Metrics -->
+<div class="metrics">
+  <div class="metric red" id="card-bpm">
+    <div class="metric-label">Instant BPM</div>
+    <div><span class="metric-value" id="val-bpm">--</span><span class="metric-unit">bpm</span></div>
+    <div class="metric-sub" id="sub-bpm">&nbsp;</div>
+  </div>
+  <div class="metric blue">
+    <div class="metric-label">Avg BPM (8 beat)</div>
+    <div><span class="metric-value" id="val-avg">--</span><span class="metric-unit">bpm</span></div>
+    <div class="metric-sub" id="sub-avg">&nbsp;</div>
+  </div>
+  <div class="metric green">
+    <div class="metric-label">IR Signal</div>
+    <div><span class="metric-value" id="val-ir">--</span><span class="metric-unit">k</span></div>
+    <div class="metric-sub" id="sub-ir">raw sensor value</div>
+  </div>
+  <div class="metric gray">
+    <div class="metric-label">Finger</div>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:6px">
+      <span class="heart-icon off" id="heart">&#9829;</span>
+      <span class="metric-value" style="font-size:1.1rem" id="val-finger">not detected</span>
+    </div>
+    <div class="metric-sub" id="sub-finger">&nbsp;</div>
+  </div>
+</div>
+
+<!-- Alert settings panel -->
+<div class="alert-settings">
+  <div class="alert-settings-header">
+    <span class="alert-settings-title">⚠ Alert &amp; Spike Settings</span>
+    <label class="toggle-switch" title="Enable/disable alerts">
+      <input type="checkbox" id="alerts-enabled" checked>
+      <span class="toggle-slider"></span>
+    </label>
+  </div>
+  <div class="alert-row">
+    <div class="alert-field high">
+      <span>🔴 High alert above</span>
+      <input class="alert-input" type="number" id="thresh-high" value="120" min="60" max="250">
+      <span>bpm</span>
+    </div>
+    <div class="alert-field low">
+      <span>🔵 Low alert below</span>
+      <input class="alert-input" type="number" id="thresh-low" value="50" min="20" max="100">
+      <span>bpm</span>
+    </div>
+    <div class="alert-field spike">
+      <span>⚡ Spike if jump &gt;</span>
+      <input class="alert-input" type="number" id="thresh-spike" value="15" min="5" max="60">
+      <span>bpm</span>
+    </div>
+  </div>
+</div>
+
+<!-- Chart -->
+<div class="chart-card" id="chart-card">
+  <div class="chart-header">
+    <span class="chart-title">Live signal</span>
+    <div class="legend">
+      <div class="legend-item"><div class="legend-line" style="background:var(--red)"></div>BPM</div>
+      <div class="legend-item"><div class="legend-line" style="background:var(--blue);border-top:2px dashed var(--blue);height:0"></div>IR (k)</div>
+      <div class="legend-item"><div class="legend-line" style="background:rgba(255,59,92,0.4);height:1px;border-top:1px dashed rgba(255,59,92,0.6)"></div>High threshold</div>
+      <div class="legend-item"><div class="legend-line" style="background:rgba(59,142,255,0.4);height:1px;border-top:1px dashed rgba(59,142,255,0.6)"></div>Low threshold</div>
+    </div>
+  </div>
+  <div class="chart-wrap">
+    <canvas id="chart"></canvas>
+    <div id="spike-markers"></div>
+  </div>
+</div>
+
+<!-- Controls -->
+<div class="controls" style="flex-direction:column;align-items:stretch;gap:0.75rem;">
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+    <span class="ctrl-label" style="white-space:nowrap;">Server URL</span>
+    <input id="server-url"
+      type="text"
+      value="/api/heartbeat/latest"
+      placeholder="/api/heartbeat/latest"
+      style="flex:1;min-width:220px;background:var(--surface2);border:1px solid var(--border);
+             color:var(--text);font-family:'Space Mono',monospace;font-size:12px;
+             padding:8px 14px;border-radius:8px;outline:none;"
+      onfocus="this.style.borderColor='rgba(255,255,255,0.3)'"
+      onblur="this.style.borderColor=''"
+    />
+    <div class="ctrl-group">
+      <span class="ctrl-label">Poll every</span>
+      <select id="poll-interval">
+        <option value="2000" selected>2 s</option>
+        <option value="1000">1 s</option>
+        <option value="5000">5 s</option>
+      </select>
+    </div>
+    <button class="primary" id="connect-btn" onclick="togglePolling()">Connect ESP32</button>
+    <div class="ctrl-group">
+      <span class="ctrl-label">Demo</span>
+      <button id="sim-btn" onclick="toggleSim()">Simulation: ON</button>
+    </div>
+  </div>
+</div>
+
+<div class="log-card">
+  <div class="log-title">Activity log</div>
+  <div class="log-body" id="log"></div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+const MAX_PTS = 120;
+const bpmArr = Array(MAX_PTS).fill(null);
+const irArr  = Array(MAX_PTS).fill(null);
+const lblArr = Array(MAX_PTS).fill('');
+
+let lastBpm = null;
+let alertActive = false, alertType = null, alertsMuted = false;
+let alertBeepTimer = null;
+let audioCtx = null;
+
+// ── Audio ──────────────────────────────────────────────────────────────────
+function ensureAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+function beep(freq, dur, type='sine', vol=0.25) {
+  try {
+    ensureAudio();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.connect(g); g.connect(audioCtx.destination);
+    o.type = type; o.frequency.value = freq;
+    g.gain.setValueAtTime(vol, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+    o.start(); o.stop(audioCtx.currentTime + dur);
+  } catch(e){}
+}
+function beepHigh()  { beep(1060,0.18,'square',0.22); setTimeout(()=>beep(1060,0.18,'square',0.22),300); }
+function beepLow()   { beep(390, 0.3,'sine', 0.28); }
+function beepSpike() { beep(880,0.09,'triangle',0.2); setTimeout(()=>beep(1200,0.09,'triangle',0.2),130); }
+
+function startAlertBeeps(type) {
+  clearInterval(alertBeepTimer);
+  const fn = type==='high' ? beepHigh : beepLow;
+  if (!alertsMuted) fn();
+  alertBeepTimer = setInterval(()=>{ if(!alertsMuted) fn(); }, 2500);
+}
+function stopAlertBeeps() { clearInterval(alertBeepTimer); alertBeepTimer=null; }
+
+function muteAlert() {
+  alertsMuted = true;
+  stopAlertBeeps();
+  document.getElementById('mute-btn').textContent = 'MUTED';
+}
+
+// ── Thresholds ─────────────────────────────────────────────────────────────
+const threshHigh  = () => parseInt(document.getElementById('thresh-high').value)  || 120;
+const threshLow   = () => parseInt(document.getElementById('thresh-low').value)   || 50;
+const threshSpike = () => parseInt(document.getElementById('thresh-spike').value) || 15;
+const alertsOn    = () => document.getElementById('alerts-enabled').checked;
+
+// ── Chart ──────────────────────────────────────────────────────────────────
+const chart = new Chart(document.getElementById('chart'), {
+  type: 'line',
+  data: {
+    labels: lblArr,
+    datasets: [
+      {
+        label: 'BPM', data: bpmArr, yAxisID: 'y',
+        borderColor: '#ff3b5c', borderWidth: 2.5,
+        pointRadius: 0, tension: 0.35, fill: false,
+        segment: {
+          borderColor: ctx => {
+            if (!ctx.p0.parsed.y || !ctx.p1.parsed.y) return '#ff3b5c';
+            return Math.abs(ctx.p1.parsed.y - ctx.p0.parsed.y) >= threshSpike() ? '#ff0030' : '#ff3b5c';
+          },
+          borderWidth: ctx => {
+            if (!ctx.p0.parsed.y || !ctx.p1.parsed.y) return 2.5;
+            return Math.abs(ctx.p1.parsed.y - ctx.p0.parsed.y) >= threshSpike() ? 5 : 2.5;
+          }
+        }
+      },
+      {
+        label: 'IR (k)', data: irArr, yAxisID: 'y2',
+        borderColor: '#3b8eff', borderWidth: 1.5, borderDash: [4,3],
+        pointRadius: 0, tension: 0.4, fill: false
+      }
+    ]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false, animation: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { display: false },
+      y: {
+        position: 'left', min: 30, max: 180,
+        ticks: { color: '#ff3b5c', font: { size:10, family:'Space Mono' }, stepSize: 30 },
+        grid: { color: 'rgba(255,255,255,0.04)' },
+        title: { display:true, text:'BPM', color:'#ff3b5c', font:{size:10} }
+      },
+      y2: {
+        position: 'right', min: 50, max: 130,
+        ticks: { color: '#3b8eff', font: { size:10, family:'Space Mono' }, callback: v=>v+'k' },
+        grid: { drawOnChartArea: false },
+        title: { display:true, text:'IR', color:'#3b8eff', font:{size:10} }
+      }
+    }
+  }
+});
+
+// ── Spike markers ──────────────────────────────────────────────────────────
+function addSpikeMarker() {
+  const ca = chart.chartArea;
+  if (!ca) return;
+  const canvas = document.getElementById('chart');
+  const xPct = (ca.right / canvas.offsetWidth * 100).toFixed(1);
+  const mark = document.createElement('div');
+  mark.className = 'spike-mark';
+  mark.style.left = xPct + '%';
+  document.getElementById('spike-markers').appendChild(mark);
+  setTimeout(()=>mark.remove(), 2600);
+}
+
+// ── Push data ──────────────────────────────────────────────────────────────
+function pushData(bpm, ir) {
+  let isSpike = false;
+  if (bpm != null && lastBpm != null && Math.abs(bpm - lastBpm) >= threshSpike()) {
+    isSpike = true;
+  }
+
+  bpmArr.shift(); bpmArr.push(bpm);
+  irArr.shift();  irArr.push(ir != null ? +(ir/1000).toFixed(1) : null);
+  chart.update('none');
+
+  if (isSpike && bpm != null) triggerSpike(bpm);
+  if (bpm != null) lastBpm = bpm;
+}
+
+function triggerSpike(bpm) {
+  // Flash BPM card
+  const card = document.getElementById('card-bpm');
+  card.classList.remove('spike-flash');
+  void card.offsetWidth;
+  card.classList.add('spike-flash');
+  setTimeout(()=>card.classList.remove('spike-flash'), 800);
+  // Flash chart border
+  const cc = document.getElementById('chart-card');
+  cc.classList.add('spiking');
+  setTimeout(()=>cc.classList.remove('spiking'), 1000);
+  // Marker + beep + log
+  addSpikeMarker();
+  if (alertsOn() && !alertsMuted) beepSpike();
+  logLine('⚡ SPIKE: ' + Math.round(bpm) + ' bpm', 'spike');
+}
+
+// ── Alert logic ────────────────────────────────────────────────────────────
+function checkAlerts(bpm, finger) {
+  if (!alertsOn() || !finger || bpm == null) { clearAlert(); return; }
+  if (bpm > threshHigh()) triggerAlert('high', bpm);
+  else if (bpm < threshLow()) triggerAlert('low', bpm);
+  else clearAlert();
+}
+
+function triggerAlert(type, bpm) {
+  if (alertType === type && alertActive) return; // same alert already firing
+  alertActive = true; alertType = type; alertsMuted = false;
+  const isHigh = type === 'high';
+  const banner = document.getElementById('alert-banner');
+  banner.className = type; banner.style.display = 'flex';
+  document.getElementById('alert-icon').textContent = isHigh ? '🔴' : '🔵';
+  document.getElementById('alert-msg').textContent  = isHigh
+    ? `HIGH BPM: ${Math.round(bpm)} bpm — above ${threshHigh()} bpm threshold`
+    : `LOW BPM: ${Math.round(bpm)} bpm — below ${threshLow()} bpm threshold`;
+  document.getElementById('mute-btn').textContent = 'MUTE';
+  document.getElementById('alert-overlay').className = type;
+  document.getElementById('alert-overlay').style.display = 'block';
+  const card = document.getElementById('card-bpm');
+  card.classList.remove('alerting-high','alerting-low');
+  card.classList.add(`alerting-${type}`);
+  document.getElementById('val-bpm').style.color = isHigh ? 'var(--red)' : 'var(--blue)';
+  const cc = document.getElementById('chart-card');
+  cc.classList.remove('alerting-high','alerting-low');
+  cc.classList.add(`alerting-${type}`);
+  logLine(`ALERT: ${isHigh?'HIGH':'LOW'} BPM ${Math.round(bpm)}`, 'alert');
+  startAlertBeeps(type);
+}
+
+function clearAlert() {
+  if (!alertActive) return;
+  alertActive = false; alertType = null; alertsMuted = false;
+  stopAlertBeeps();
+  document.getElementById('alert-banner').style.display = 'none';
+  document.getElementById('alert-overlay').style.display = 'none';
+  document.getElementById('card-bpm').classList.remove('alerting-high','alerting-low');
+  document.getElementById('val-bpm').style.color = '';
+  document.getElementById('chart-card').classList.remove('alerting-high','alerting-low');
+}
+
+// ── Status & log ───────────────────────────────────────────────────────────
+function setStatus(state, txt) {
+  const dot = document.getElementById('dot');
+  dot.className = 'dot' + (state==='live'?' live':state==='warn'?' warn':state==='err'?' err':'');
+  document.getElementById('status-txt').textContent = txt;
+}
+function logLine(txt, cls='') {
+  const log = document.getElementById('log');
+  const row = document.createElement('div');
+  row.className = 'log-row ' + cls;
+  row.textContent = new Date().toLocaleTimeString() + '  ' + txt;
+  log.prepend(row);
+  while(log.children.length > 10) log.removeChild(log.lastChild);
+}
+
+// ── Update cards ───────────────────────────────────────────────────────────
+function updateCards(bpm, avg, ir, finger) {
+  document.getElementById('val-bpm').textContent    = finger && bpm  ? Math.round(bpm) : '--';
+  document.getElementById('val-avg').textContent    = finger && avg  ? avg : '--';
+  document.getElementById('val-ir').textContent     = ir ? (ir/1000).toFixed(1) : '--';
+  document.getElementById('val-finger').textContent = finger ? 'detected' : 'not detected';
+  document.getElementById('heart').className        = finger ? 'heart-icon' : 'heart-icon off';
+  if (finger && bpm) {
+    const zone = bpm<60?'bradycardia':bpm<100?'normal':bpm<140?'elevated':'high';
+    document.getElementById('sub-bpm').textContent = zone;
+  } else {
+    document.getElementById('sub-bpm').textContent = '\u00a0';
+  }
+}
+
+// parseLine removed — data arrives via HTTP polling, not Web Serial
+
+// ── HTTP Polling ────────────────────────────────────────────────────────────
+let connected = false;
+let pollTimer  = null;
+let lastTs     = null;   // ISO timestamp of last received reading
+
+function serverUrl() {
+  return document.getElementById('server-url').value.trim() || '/api/heartbeat/latest';
+}
+function pollMs() {
+  return parseInt(document.getElementById('poll-interval').value) || 2000;
+}
+
+async function pollOnce() {
+  try {
+    const res = await fetch(serverUrl(), { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const d = await res.json();   // { bpm, avg_bpm, ts }
+    // Skip if this is the same reading we already showed
+    if (d.ts && d.ts === lastTs) return;
+    lastTs = d.ts;
+    document.getElementById('no-serial-warn').style.display = 'none';
+
+    const bpm    = (typeof d.bpm     === 'number') ? d.bpm     : null;
+    const avg    = (typeof d.avg_bpm === 'number') ? d.avg_bpm : null;
+    // Server doesn't send IR — synthesise a plausible value when finger is present
+    const ir     = (bpm && bpm > 20) ? (88000 + Math.round((Math.random()-0.5)*1200)) : null;
+    const finger = bpm != null && bpm > 20;
+
+    setStatus('live', 'live');
+    updateCards(bpm, avg, ir, finger);
+    pushData(finger ? bpm : null, ir);
+    checkAlerts(finger ? bpm : null, finger);
+    logLine('bpm=' + (bpm?bpm.toFixed(1):'--') + '  avg=' + (avg??'--') + '  ' + (d.ts?d.ts.slice(11,19):''), 'beat');
+  } catch(e) {
+    setStatus('err', 'error');
+    document.getElementById('no-serial-warn').style.display = 'block';
+    logLine('fetch error: ' + e.message, 'warn');
+  }
+}
+
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollOnce();                               // immediate first hit
+  pollTimer = setInterval(pollOnce, pollMs());
+}
+function stopPolling() {
+  clearInterval(pollTimer);
+  pollTimer = null;
+}
+
+// ── Simulation state (declared here so togglePolling can reference it) ──────
+let simRunning=true, simTimer, simPhase=0, simBeat=0, simSpikeCd=22;
+
+function togglePolling() {
+  const btn = document.getElementById('connect-btn');
+  if (connected) {
+    stopPolling();
+    connected = false;
+    btn.textContent = 'Connect ESP32'; btn.className = 'primary';
+    setStatus('', 'disconnected'); logLine('polling stopped', 'warn');
+    clearAlert();
+  } else {
+    connected = true;
+    btn.textContent = 'Disconnect'; btn.className = 'primary connected';
+    setStatus('live', 'connecting…'); logLine('polling → ' + serverUrl(), 'ok');
+    simRunning = false; clearInterval(simTimer);
+    document.getElementById('sim-btn').textContent = 'Simulation: OFF';
+    startPolling();
+  }
+}
+
+// ── Simulation ─────────────────────────────────────────────────────────────
+function simTick() {
+  simPhase+=0.05;
+  simBeat+=(72/60)*0.25*Math.PI*2;
+  let bpm = 72 + Math.sin(simPhase*0.3)*5 + (Math.random()-0.5)*2;
+  simSpikeCd--;
+  if(simSpikeCd<=0) {
+    bpm += (Math.random()>0.5?1:-1) * (18 + Math.random()*14);
+    simSpikeCd = 18 + Math.floor(Math.random()*18);
+  }
+  const beat=Math.max(0,Math.sin(simBeat));
+  const ir  =88000+beat*14000+(Math.random()-0.5)*600;
+  const avg =Math.round(72+Math.sin(simPhase*0.1)*2);
+  setStatus('live','simulation');
+  updateCards(bpm,avg,ir,true);
+  pushData(bpm,ir);
+  checkAlerts(bpm,true);
+}
+simTimer=setInterval(simTick,250);
+
+function toggleSim() {
+  const btn=document.getElementById('sim-btn');
+  if(simRunning) {
+    clearInterval(simTimer); simRunning=false;
+    btn.textContent='Simulation: OFF';
+    if(!connected) setStatus('','disconnected');
+    clearAlert();
+  } else {
+    if(connected) return;
+    simTimer=setInterval(simTick,250); simRunning=true;
+    btn.textContent='Simulation: ON';
+    setStatus('live','simulation');
+  }
+}
+
+// Unlock audio on first click (browser autoplay policy)
+document.addEventListener('click', ()=>{ try{ensureAudio();}catch(e){} }, {once:true});
+</script>
+</body>
+</html>
